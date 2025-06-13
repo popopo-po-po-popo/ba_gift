@@ -83,7 +83,7 @@ def get_optimal_gifts_per_character(df, selected_characters, rarity_dict):
 
     filtered_df = df[df['character'].isin(selected_characters)].copy()
     if filtered_df.empty:
-        return {char: [] for char in selected_characters}
+        return {char: {'unique': [], 'shared': []} for char in selected_characters}
 
     idx = filtered_df.groupby(['gift'])['effect_cat'].transform(lambda x: x == x.max())
     best_use_df = filtered_df[idx].copy()
@@ -98,13 +98,25 @@ def get_optimal_gifts_per_character(df, selected_characters, rarity_dict):
         if not char_gifts_df.empty:
             char_gifts_df.loc[:, 'rarity'] = char_gifts_df['gift'].map(lambda x: rarity_dict.get(x, 0))
             
-            sorted_gifts_df = char_gifts_df.sort_values(
+            unique_gifts_df = char_gifts_df[char_gifts_df['competition'] == 1].copy()
+            shared_gifts_df = char_gifts_df[char_gifts_df['competition'] > 1].copy()
+            
+            unique_sorted = unique_gifts_df.sort_values(
+                by=['rarity', 'effect_cat', 'gift'],
+                ascending=[False, False, True]
+            )
+            
+            shared_sorted = shared_gifts_df.sort_values(
                 by=['rarity', 'competition', 'effect_cat', 'gift'],
                 ascending=[False, True, False, True]
             )
-            optimal_gifts[char] = sorted_gifts_df['gift'].tolist()
+            
+            optimal_gifts[char] = {
+                'unique': unique_sorted['gift'].tolist(),
+                'shared': shared_sorted['gift'].tolist()
+            }
         else:
-            optimal_gifts[char] = []
+            optimal_gifts[char] = {'unique': [], 'shared': []}
             
     return optimal_gifts
 
@@ -194,16 +206,26 @@ if df is not None:
             st.markdown("#### 贈り方")
             if optimal_gifts_data:
                 max_char_length = 0
+                max_unique_width = 0
+                
                 for char in optimal_gifts_data.keys():
                     char_length = sum(2 if ord(c) > 127 else 1 for c in char)
                     max_char_length = max(max_char_length, char_length)
+                    
+                    unique_gifts = optimal_gifts_data[char]['unique']
+                    unique_width = len(unique_gifts) * 44
+                    max_unique_width = max(max_unique_width, unique_width)
                 
                 char_name_width = max(max_char_length * 9 + 20, 80)
+                unique_section_width = max(max_unique_width, 0)
                 
-                for char, gifts in optimal_gifts_data.items():
-                    image_html_parts = []
-                    if gifts:
-                        for gift_name in gifts:
+                for char, gifts_data in optimal_gifts_data.items():
+                    unique_gifts = gifts_data['unique']
+                    shared_gifts = gifts_data['shared']
+                    
+                    unique_html_parts = []
+                    if unique_gifts:
+                        for gift_name in unique_gifts:
                             gift_image_path = find_image_path(GIFT_IMAGE_DIR, gift_name)
                             base64_image = get_image_as_base64(gift_image_path)
                             border_style = get_rarity_border_style(gift_name, rarity_dict)
@@ -211,18 +233,34 @@ if df is not None:
                             if base64_image:
                                 file_extension = os.path.splitext(gift_image_path)[1][1:].lower()
                                 mime_type = f"image/{'jpeg' if file_extension == 'jpg' else file_extension}"
-                                image_html_parts.append(f"<img src='data:{mime_type};base64,{base64_image}' width='40' title='{gift_name}' style='margin: 2px; border-radius: 5px; vertical-align: middle; {border_style}'>")
+                                unique_html_parts.append(f"<img src='data:{mime_type};base64,{base64_image}' width='40' title='{gift_name}' style='margin: 2px; border-radius: 5px; vertical-align: middle; {border_style}'>")
                             else:
-                                image_html_parts.append(f"<div class='no-image-list-item' title='{gift_name}' style='{border_style}'></div>")
-                        
-                        image_container_html = f"<div style='flex-grow: 1; display: flex; flex-wrap: wrap; align-items: center;'>{''.join(image_html_parts)}</div>"
-                    else:
-                        image_container_html = "<div style='flex-grow: 1;'>（最適な贈り物が見つかりませんでした）</div>"
+                                unique_html_parts.append(f"<div class='no-image-list-item' title='{gift_name}' style='{border_style}'></div>")
+                    
+                    shared_html_parts = []
+                    if shared_gifts:
+                        for gift_name in shared_gifts:
+                            gift_image_path = find_image_path(GIFT_IMAGE_DIR, gift_name)
+                            base64_image = get_image_as_base64(gift_image_path)
+                            border_style = get_rarity_border_style(gift_name, rarity_dict)
+                            
+                            if base64_image:
+                                file_extension = os.path.splitext(gift_image_path)[1][1:].lower()
+                                mime_type = f"image/{'jpeg' if file_extension == 'jpg' else file_extension}"
+                                shared_html_parts.append(f"<img src='data:{mime_type};base64,{base64_image}' width='40' title='{gift_name}' style='margin: 2px; border-radius: 5px; vertical-align: middle; {border_style}'>")
+                            else:
+                                shared_html_parts.append(f"<div class='no-image-list-item' title='{gift_name}' style='{border_style}'></div>")
+                    
+                    unique_container_html = f"<div style='width: {unique_section_width}px; display: flex; flex-wrap: wrap; align-items: center;'>{''.join(unique_html_parts)}</div>"
+                    shared_container_html = f"<div style='display: flex; flex-wrap: wrap; align-items: center;'>{''.join(shared_html_parts)}</div>" if shared_html_parts else ""
+                    
+                    separator = "<div style='width: 15px;'></div>" if unique_section_width > 0 and shared_container_html else ""
+                    gifts_container = f"<div style='flex-grow: 1; display: flex; align-items: center;'>{unique_container_html}{separator}{shared_container_html}</div>"
 
                     full_line_html = f"""
                     <div style="display: flex; align-items: center; margin-bottom: 8px; min-height: 44px;">
                         <div style="width: {char_name_width}px; font-weight: bold; flex-shrink: 0; margin-right: 10px; font-size: 14px;">{char}</div>
-                        {image_container_html}
+                        {gifts_container}
                     </div>
                     """
                     st.markdown(full_line_html, unsafe_allow_html=True)
@@ -232,15 +270,16 @@ if df is not None:
             favorite_gifts = set(result_df['gift'].unique())
             useless_gifts = list(all_gifts - favorite_gifts)
             
-            useless_gifts = [gift for gift in useless_gifts if rarity_dict.get(gift, 0) != 1]
+            rare_useless_gifts = [gift for gift in useless_gifts if rarity_dict.get(gift, 0) == 1]
+            common_useless_gifts = [gift for gift in useless_gifts if rarity_dict.get(gift, 0) != 1]
             
-            useless_gifts_with_rarity = [(gift, rarity_dict.get(gift, 0)) for gift in useless_gifts]
-            useless_gifts_sorted = sorted(useless_gifts_with_rarity, key=lambda x: (-x[1], x[0]))
-            useless_gifts = [gift for gift, _ in useless_gifts_sorted]
+            common_useless_gifts_with_rarity = [(gift, rarity_dict.get(gift, 0)) for gift in common_useless_gifts]
+            common_useless_gifts_sorted = sorted(common_useless_gifts_with_rarity, key=lambda x: (-x[1], x[0]))
+            common_useless_gifts = [gift for gift, _ in common_useless_gifts_sorted]
             
-            if useless_gifts:
+            if common_useless_gifts:
                 image_html_parts = []
-                for gift_name in useless_gifts:
+                for gift_name in common_useless_gifts:
                     gift_image_path = find_image_path(GIFT_IMAGE_DIR, gift_name)
                     base64_image = get_image_as_base64(gift_image_path)
                     border_style = get_rarity_border_style(gift_name, rarity_dict)
@@ -254,6 +293,28 @@ if df is not None:
                 
                 useless_gifts_html = f"<div style='display: flex; flex-wrap: wrap; align-items: center;'>{''.join(image_html_parts)}</div>"
                 st.markdown(useless_gifts_html, unsafe_allow_html=True)
+            else:
+                st.write("（なし）")
+
+            st.markdown("---")
+            st.markdown("#### うんち")
+            if rare_useless_gifts:
+                rare_useless_gifts_sorted = sorted(rare_useless_gifts)
+                image_html_parts = []
+                for gift_name in rare_useless_gifts_sorted:
+                    gift_image_path = find_image_path(GIFT_IMAGE_DIR, gift_name)
+                    base64_image = get_image_as_base64(gift_image_path)
+                    border_style = get_rarity_border_style(gift_name, rarity_dict)
+                    
+                    if base64_image:
+                        file_extension = os.path.splitext(gift_image_path)[1][1:].lower()
+                        mime_type = f"image/{'jpeg' if file_extension == 'jpg' else file_extension}"
+                        image_html_parts.append(f"<img src='data:{mime_type};base64,{base64_image}' width='40' title='{gift_name}' style='margin: 2px; border-radius: 5px; {border_style}'>")
+                    else:
+                        image_html_parts.append(f"<div class='no-image-list-item' title='{gift_name}' style='{border_style}'></div>")
+                
+                rare_useless_gifts_html = f"<div style='display: flex; flex-wrap: wrap; align-items: center;'>{''.join(image_html_parts)}</div>"
+                st.markdown(rare_useless_gifts_html, unsafe_allow_html=True)
             else:
                 st.write("（なし）")
 else:
