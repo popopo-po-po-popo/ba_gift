@@ -2,8 +2,11 @@ import streamlit as st
 import pandas as pd
 import os
 import base64
+from PIL import Image
+import io
 
 GIFT_IMAGE_DIR = os.path.join('images', 'gift')
+CHAR_IMAGE_DIR = os.path.join('images', 'char')
 
 @st.cache_data
 def get_image_as_base64(path):
@@ -12,6 +15,30 @@ def get_image_as_base64(path):
     with open(path, "rb") as f:
         data = f.read()
     return base64.b64encode(data).decode()
+
+@st.cache_data
+def get_char_image_as_base64(char_name):
+    image_path = find_image_path(CHAR_IMAGE_DIR, char_name)
+    if not image_path:
+        return None
+    
+    try:
+        with Image.open(image_path) as img:
+            img = img.convert("RGBA")
+            width, height = img.size
+            
+            short_side = min(width, height)
+            left = (width - short_side) / 2
+            top = (height - short_side) / 2
+            right = (width + short_side) / 2
+            bottom = (height + short_side) / 2
+            cropped_img = img.crop((left, top, right, bottom))
+            
+            buffered = io.BytesIO()
+            cropped_img.save(buffered, format="PNG")
+            return base64.b64encode(buffered.getvalue()).decode()
+    except Exception:
+        return None
 
 @st.cache_data
 def load_rarity_data():
@@ -120,6 +147,75 @@ def get_optimal_gifts_per_character(df, selected_characters, rarity_dict):
             
     return optimal_gifts
 
+def get_shared_gifts_reverse_lookup(df, selected_characters, rarity_dict):
+    if df is None or df.empty or not selected_characters:
+        return {}
+
+    filtered_df = df[df['character'].isin(selected_characters)].copy()
+    if filtered_df.empty:
+        return {}
+
+    idx = filtered_df.groupby(['gift'])['effect_cat'].transform(lambda x: x == x.max())
+    best_use_df = filtered_df[idx].copy()
+
+    gift_competition = best_use_df.groupby('gift')['character'].nunique()
+    best_use_df['competition'] = best_use_df['gift'].map(gift_competition)
+
+    shared_gifts_df = best_use_df[best_use_df['competition'] > 1].copy()
+    
+    if shared_gifts_df.empty:
+        return {}
+
+    effect_order_dict = {'中': 0, '大': 1, '特大': 2}
+
+    shared_gifts_reverse = {}
+    for gift_name in shared_gifts_df['gift'].unique():
+        gift_chars_df = shared_gifts_df[shared_gifts_df['gift'] == gift_name]
+        characters = sorted(gift_chars_df['character'].unique())
+        
+        rarity = rarity_dict.get(gift_name, 0)
+        competition = gift_chars_df['competition'].iloc[0]
+        effect_cat = gift_chars_df['effect_cat'].iloc[0]
+        effect_order = effect_order_dict.get(str(effect_cat), 0)
+        
+        shared_gifts_reverse[gift_name] = {
+            'characters': characters,
+            'rarity': rarity,
+            'competition': competition,
+            'effect_order': effect_order
+        }
+    
+    sorted_gifts = sorted(shared_gifts_reverse.items(), 
+                         key=lambda x: (-x[1]['rarity'], x[1]['competition'], -x[1]['effect_order'], x[0]))
+    
+    return dict(sorted_gifts)
+
+def get_generation_candidates(df, selected_characters, rarity_dict):
+    if df is None or df.empty or not selected_characters:
+        return []
+    
+    filtered_df = df[df['character'].isin(selected_characters)].copy()
+    if filtered_df.empty:
+        return []
+    
+    yellow_gifts_df = filtered_df[filtered_df['gift'].map(lambda x: rarity_dict.get(x, 0) == 0)].copy()
+    if yellow_gifts_df.empty:
+        return []
+    
+    best_effect_df = yellow_gifts_df.loc[yellow_gifts_df.groupby('gift')['effect_cat'].idxmax()].copy()
+    
+    max_effect = best_effect_df['effect_cat'].max()
+    
+    top_candidates = best_effect_df[best_effect_df['effect_cat'] == max_effect].copy()
+    
+    top_candidates['num_chars'] = top_candidates.groupby('gift')['character'].transform('count')
+    top_candidates_sorted = top_candidates.sort_values(
+        by=['num_chars', 'gift'],
+        ascending=[False, True]
+    )
+    
+    return top_candidates_sorted['gift'].unique().tolist()
+
 def find_image_path(dir_path, name):
     for ext in ['.png', '.jpg', '.jpeg']:
         path = os.path.join(dir_path, f"{name}{ext}")
@@ -185,6 +281,20 @@ st.markdown("""
         font-size: 13px;
         margin: 0;
     }
+    .reverse-lookup-item {
+        display: flex;
+        align-items: center;
+        margin-bottom: 8px;
+        min-height: 44px;
+    }
+    .reverse-lookup-image {
+        flex: 0 0 44px;
+        margin-right: 10px;
+    }
+    .reverse-lookup-characters {
+        flex: 1;
+        font-size: 14px;
+    }
     </style>
     """, unsafe_allow_html=True)
 
@@ -205,18 +315,13 @@ if df is not None:
 
             st.markdown("#### 贈り方")
             if optimal_gifts_data:
-                max_char_length = 0
                 max_unique_width = 0
-                
                 for char in optimal_gifts_data.keys():
-                    char_length = sum(2 if ord(c) > 127 else 1 for c in char)
-                    max_char_length = max(max_char_length, char_length)
-                    
                     unique_gifts = optimal_gifts_data[char]['unique']
                     unique_width = len(unique_gifts) * 44
                     max_unique_width = max(max_unique_width, unique_width)
                 
-                char_name_width = max(max_char_length * 9 + 20, 80)
+                char_image_container_width = 44
                 unique_section_width = max(max_unique_width, 0)
                 
                 for char, gifts_data in optimal_gifts_data.items():
@@ -257,13 +362,98 @@ if df is not None:
                     separator = "<div style='width: 15px;'></div>" if unique_section_width > 0 and shared_container_html else ""
                     gifts_container = f"<div style='flex-grow: 1; display: flex; align-items: center;'>{unique_container_html}{separator}{shared_container_html}</div>"
 
+                    char_image_base64 = get_char_image_as_base64(char)
+                    if char_image_base64:
+                        char_html = f"<img src='data:image/png;base64,{char_image_base64}' title='{char}' style='width: 44px; height: 44px; border-radius: 50%; object-fit: cover;'>"
+                    else:
+                        char_html = f"<div title='{char}' style='width: 44px; height: 44px; border-radius: 50%; background-color: #e0e0e0; display: flex; align-items: center; justify-content: center; font-size: 14px; text-align: center; color: #555; line-height: 1.2; font-weight: bold;'>{char[:2]}</div>"
+                    
                     full_line_html = f"""
                     <div style="display: flex; align-items: center; margin-bottom: 8px; min-height: 44px;">
-                        <div style="width: {char_name_width}px; font-weight: bold; flex-shrink: 0; margin-right: 10px; font-size: 14px;">{char}</div>
+                        <div style="width: {char_image_container_width}px; flex-shrink: 0; margin-right: 10px;">{char_html}</div>
                         {gifts_container}
                     </div>
                     """
                     st.markdown(full_line_html, unsafe_allow_html=True)
+
+            st.markdown("---")
+            st.markdown("#### 共通品 逆引き")
+            shared_gifts_reverse = get_shared_gifts_reverse_lookup(df, selected_characters, rarity_dict)
+            
+            if shared_gifts_reverse:
+                gifts_list = list(shared_gifts_reverse.items())
+                
+                left_column_items = []
+                right_column_items = []
+
+                for i in range(0, len(gifts_list), 2):
+                    left_gift_name, left_gift_data = gifts_list[i]
+                    left_chars_html_parts = []
+                    for char in left_gift_data['characters']:
+                        base64_img = get_char_image_as_base64(char)
+                        if base64_img:
+                            left_chars_html_parts.append(f"<img src='data:image/png;base64,{base64_img}' title='{char}' style='width: 44px; height: 44px; border-radius: 50%; object-fit: cover; margin: 2px;'>")
+                        else:
+                            left_chars_html_parts.append(f"<div title='{char}' style='width: 44px; height: 44px; border-radius: 50%; background-color: #e0e0e0; display: flex; align-items: center; justify-content: center; font-size: 14px; margin: 2px; font-weight: bold;'>{char[:2]}</div>")
+                    left_characters_html = f"<div style='display: flex; align-items: center; flex-wrap: wrap;'>{''.join(left_chars_html_parts)}</div>"
+                    
+                    left_gift_image_path = find_image_path(GIFT_IMAGE_DIR, left_gift_name)
+                    left_base64_image = get_image_as_base64(left_gift_image_path)
+                    left_border_style = get_rarity_border_style(left_gift_name, rarity_dict)
+                    if left_base64_image:
+                        file_extension = os.path.splitext(left_gift_image_path)[1][1:].lower()
+                        mime_type = f"image/{'jpeg' if file_extension == 'jpg' else file_extension}"
+                        left_image_html = f"<img src='data:{mime_type};base64,{left_base64_image}' width='40' title='{left_gift_name}' style='border-radius: 5px; {left_border_style}'>"
+                    else:
+                        left_image_html = f"<div class='no-image-list-item' title='{left_gift_name}' style='{left_border_style}'></div>"
+                    
+                    left_item_html = f'<div style="display: flex; align-items: center; min-height: 44px; margin-bottom: 8px;">' \
+                                   f'<div style="flex-shrink: 0; margin-right: 10px;">{left_image_html}</div>' \
+                                   f'<div>{left_characters_html}</div>' \
+                                   f'</div>'
+                    left_column_items.append(left_item_html)
+
+                    if i + 1 < len(gifts_list):
+                        right_gift_name, right_gift_data = gifts_list[i + 1]
+                        right_chars_html_parts = []
+                        for char in right_gift_data['characters']:
+                            base64_img = get_char_image_as_base64(char)
+                            if base64_img:
+                                right_chars_html_parts.append(f"<img src='data:image/png;base64,{base64_img}' title='{char}' style='width: 44px; height: 44px; border-radius: 50%; object-fit: cover; margin: 2px;'>")
+                            else:
+                                right_chars_html_parts.append(f"<div title='{char}' style='width: 44px; height: 44px; border-radius: 50%; background-color: #e0e0e0; display: flex; align-items: center; justify-content: center; font-size: 14px; margin: 2px; font-weight: bold;'>{char[:2]}</div>")
+                        right_characters_html = f"<div style='display: flex; align-items: center; flex-wrap: wrap;'>{''.join(right_chars_html_parts)}</div>"
+
+                        right_gift_image_path = find_image_path(GIFT_IMAGE_DIR, right_gift_name)
+                        right_base64_image = get_image_as_base64(right_gift_image_path)
+                        right_border_style = get_rarity_border_style(right_gift_name, rarity_dict)
+                        if right_base64_image:
+                            file_extension = os.path.splitext(right_gift_image_path)[1][1:].lower()
+                            mime_type = f"image/{'jpeg' if file_extension == 'jpg' else file_extension}"
+                            right_image_html = f"<img src='data:{mime_type};base64,{right_base64_image}' width='40' title='{right_gift_name}' style='border-radius: 5px; {right_border_style}'>"
+                        else:
+                            right_image_html = f"<div class='no-image-list-item' title='{right_gift_name}' style='{right_border_style}'></div>"
+                        
+                        right_item_html = f'<div style="display: flex; align-items: center; min-height: 44px; margin-bottom: 8px;">' \
+                                        f'<div style="flex-shrink: 0; margin-right: 10px;">{right_image_html}</div>' \
+                                        f'<div>{right_characters_html}</div>' \
+                                        f'</div>'
+                        right_column_items.append(right_item_html)
+                    else:
+                        right_column_items.append('<div style="min-height: 44px; margin-bottom: 8px;"></div>')
+
+                left_column_full_html = "".join(left_column_items)
+                right_column_full_html = "".join(right_column_items)
+                
+                full_reverse_html = f"""
+                <div style="display: grid; grid-template-columns: max-content 1fr; align-items: start; gap: 0 20px;">
+                    <div>{left_column_full_html}</div>
+                    <div>{right_column_full_html}</div>
+                </div>
+                """
+                st.markdown(full_reverse_html, unsafe_allow_html=True)
+            else:
+                st.write("（なし）")
 
             st.markdown("---")
             st.markdown("#### テイラー")
@@ -293,6 +483,29 @@ if df is not None:
                 
                 useless_gifts_html = f"<div style='display: flex; flex-wrap: wrap; align-items: center;'>{''.join(image_html_parts)}</div>"
                 st.markdown(useless_gifts_html, unsafe_allow_html=True)
+            else:
+                st.write("（なし）")
+
+            st.markdown("---")
+            st.markdown("#### 選択ボックス")
+            generation_candidates = get_generation_candidates(df, selected_characters, rarity_dict)
+            
+            if generation_candidates:
+                image_html_parts = []
+                for gift_name in generation_candidates:
+                    gift_image_path = find_image_path(GIFT_IMAGE_DIR, gift_name)
+                    base64_image = get_image_as_base64(gift_image_path)
+                    border_style = get_rarity_border_style(gift_name, rarity_dict)
+                    
+                    if base64_image:
+                        file_extension = os.path.splitext(gift_image_path)[1][1:].lower()
+                        mime_type = f"image/{'jpeg' if file_extension == 'jpg' else file_extension}"
+                        image_html_parts.append(f"<img src='data:{mime_type};base64,{base64_image}' width='40' title='{gift_name}' style='margin: 2px; border-radius: 5px; {border_style}'>")
+                    else:
+                        image_html_parts.append(f"<div class='no-image-list-item' title='{gift_name}' style='{border_style}'></div>")
+                
+                candidates_html = f"<div style='display: flex; flex-wrap: wrap; align-items: center;'>{''.join(image_html_parts)}</div>"
+                st.markdown(candidates_html, unsafe_allow_html=True)
             else:
                 st.write("（なし）")
 
